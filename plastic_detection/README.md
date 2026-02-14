@@ -19,22 +19,28 @@ Real-time plastic waste detection and resin type classification using YOLOv4 (Op
 
 ## Setup
 
-### 1. Clone the repository
+### Windows (Quick Setup)
+
+Double-click `setup.bat` — it automatically creates a virtual environment, installs dependencies, and downloads model weights. No manual steps needed.
+
+### Manual Setup (Linux / macOS / Windows)
+
+#### 1. Clone the repository
 
 ```bash
 git clone https://github.com/SSHRIHARI006/plastic_waste_detector.git
 cd plastic_waste_detector/plastic_detection
 ```
 
-### 2. Create a virtual environment (recommended)
+#### 2. Create a virtual environment
 
 ```bash
 python -m venv venv
 source venv/bin/activate        # Linux/macOS
-# venv\Scripts\activate         # Windows
+venv\Scripts\activate           # Windows
 ```
 
-### 3. Install dependencies
+#### 3. Install dependencies
 
 ```bash
 pip install -r requirements.txt
@@ -46,7 +52,9 @@ For the hybrid detection pipeline (optional), also install PyTorch:
 pip install torch torchvision
 ```
 
-### 4. Download model weights
+#### 4. Download model weights
+
+**This step is required.** Model weights are not included in the repository due to their size.
 
 The YOLOv4 weights are required. Download them into the `model/` directory:
 
