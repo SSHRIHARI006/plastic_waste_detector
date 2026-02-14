@@ -5,6 +5,7 @@ import tempfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import List, Literal, Optional
 
 import cv2
 import numpy as np
@@ -12,8 +13,7 @@ import uvicorn
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
-from typing import Literal
+from pydantic import BaseModel, Field, field_validator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,13 +39,49 @@ class DetectionEvent(BaseModel):
     materialName: str | None = Field(None, examples=["Polyethylene Terephthalate"])
     resinCode: int | None = Field(None, ge=1, le=7, examples=[1])
     recyclable: bool | None = Field(None, examples=[True])
+    description: str | None = Field(None, examples=["PET water/soda bottles"])
+
+    @field_validator("plasticType")
+    @classmethod
+    def validate_plastic_type(cls, v: str) -> str:
+        if v not in VALID_PLASTIC_TYPES:
+            raise ValueError(
+                f"Invalid plasticType '{v}'. Must be one of: {VALID_PLASTIC_TYPES}"
+            )
+        return v
+
+    @field_validator("material")
+    @classmethod
+    def validate_material(cls, v: str | None) -> str | None:
+        if v is not None and v not in VALID_MATERIALS:
+            raise ValueError(
+                f"Invalid material '{v}'. Must be one of: {VALID_MATERIALS}"
+            )
+        return v
+
+
+class ImageDetectionResult(BaseModel):
+    """Result for a single image in a batch detection request."""
+    filename: str
+    detections: list[dict]
+    count: int
+
+
+class BatchDetectionResponse(BaseModel):
+    """Response for batch image detection."""
+    results: list[ImageDetectionResult]
+    total_images: int
+    total_detections: int
 
 
 class StatsResponse(BaseModel):
     total_detections: int
     by_type: dict[str, int]
     by_zone: dict[str, int]
-    latest: list[DetectionEvent]
+    by_material: dict[str, int]
+    recyclable: int
+    non_recyclable: int
+    latest: list[dict]
 
 
 detections: list[dict] = []
@@ -81,9 +117,19 @@ def _get_detector():
     global _detector
     if _detector is None:
         try:
-            from detector import PlasticDetector
-            _detector = PlasticDetector()
-            log.info("PlasticDetector loaded for image detection endpoint")
+            from detector import PlasticDetector, CFG_PATH, WEIGHTS_PATH, CFG_PATH_TINY, WEIGHTS_PATH_TINY
+            # Use tiny model if full weights are not available
+            if WEIGHTS_PATH.is_file():
+                _detector = PlasticDetector()
+                log.info("PlasticDetector loaded (full YOLOv4)")
+            elif WEIGHTS_PATH_TINY.is_file():
+                _detector = PlasticDetector(
+                    cfg=CFG_PATH_TINY, weights=WEIGHTS_PATH_TINY,
+                    multi_scale=False,
+                )
+                log.info("PlasticDetector loaded (YOLOv4-tiny fallback)")
+            else:
+                raise FileNotFoundError("No YOLO weights found in model/ directory")
         except Exception as exc:
             log.error("Failed to load detector: %s", exc)
             raise HTTPException(status_code=503, detail=f"Detector not available: {exc}")
@@ -212,11 +258,105 @@ async def detect_image(
     )
 
 
+@app.post("/detect/batch", response_model=BatchDetectionResponse)
+async def detect_batch(
+    files: list[UploadFile] = File(..., description="Multiple image files"),
+    zone: str = Query("Z-101", description="Monitoring zone ID"),
+    conf: float = Query(0.4, ge=0.0, le=1.0, description="Confidence threshold"),
+):
+    """Run plastic detection on a batch of uploaded images."""
+    if not files:
+        raise HTTPException(400, "No files provided")
+
+    detector = _get_detector()
+    detector.conf_threshold = conf
+
+    results: list[ImageDetectionResult] = []
+    grand_total = 0
+
+    for upload in files:
+        if upload.content_type and not upload.content_type.startswith("image/"):
+            results.append(ImageDetectionResult(
+                filename=upload.filename or "unknown",
+                detections=[],
+                count=0,
+            ))
+            continue
+
+        contents = await upload.read()
+        if not contents:
+            results.append(ImageDetectionResult(
+                filename=upload.filename or "unknown",
+                detections=[],
+                count=0,
+            ))
+            continue
+
+        nparr = np.frombuffer(contents, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if frame is None:
+            results.append(ImageDetectionResult(
+                filename=upload.filename or "unknown",
+                detections=[],
+                count=0,
+            ))
+            continue
+
+        dets = detector.detect(frame)
+
+        events = []
+        for det in dets:
+            record = {
+                "zoneId": zone,
+                "plasticType": det["plastic_type"],
+                "itemType": det.get("item_type", ""),
+                "material": det.get("material", ""),
+                "materialName": det.get("material_name", ""),
+                "resinCode": det.get("resin_code", 7),
+                "recyclable": det.get("recyclable", False),
+                "confidence": det["confidence"],
+                "description": det.get("description", ""),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "received_at": datetime.now(timezone.utc).isoformat(),
+                "source": upload.filename,
+            }
+            detections.append(record)
+            events.append(record)
+
+        if events:
+            _append_to_log(events)
+
+        det_dicts = [{
+            "type": d["plastic_type"],
+            "item": d.get("item_type", ""),
+            "material": d.get("material", ""),
+            "resin_code": d.get("resin_code", 7),
+            "recyclable": d.get("recyclable", False),
+            "confidence": d["confidence"],
+            "description": d.get("description", ""),
+        } for d in dets]
+
+        results.append(ImageDetectionResult(
+            filename=upload.filename or "unknown",
+            detections=det_dicts,
+            count=len(dets),
+        ))
+        grand_total += len(dets)
+
+    return BatchDetectionResponse(
+        results=results,
+        total_images=len(results),
+        total_detections=grand_total,
+    )
+
+
 @app.get("/detections")
 def get_detections(
     limit: int = Query(50, ge=1, le=500),
     zone: str | None = None,
     plastic_type: str | None = None,
+    start: str | None = Query(None, description="ISO datetime lower bound (inclusive)"),
+    end: str | None = Query(None, description="ISO datetime upper bound (inclusive)"),
 ):
     filtered = detections
 
@@ -224,6 +364,10 @@ def get_detections(
         filtered = [d for d in filtered if d.get("zoneId") == zone]
     if plastic_type:
         filtered = [d for d in filtered if d.get("plasticType") == plastic_type]
+    if start:
+        filtered = [d for d in filtered if d.get("timestamp", "") >= start]
+    if end:
+        filtered = [d for d in filtered if d.get("timestamp", "") <= end]
 
     return {"total": len(filtered), "detections": filtered[-limit:][::-1]}
 
