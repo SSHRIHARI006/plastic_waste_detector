@@ -788,6 +788,7 @@ class PlasticDetector:
         roi_margin: float = 0.10,
         confirm_secs: float = 3.0,
         min_presence: float = 2.0,
+        use_tiling: bool = True,
     ):
         self.conf_threshold = conf_threshold
         self.nms_threshold = nms_threshold
@@ -795,6 +796,7 @@ class PlasticDetector:
         self.multi_scale = multi_scale
         self.temporal_smooth = temporal_smooth
         self.roi_margin = roi_margin
+        self.use_tiling = use_tiling
         self._history: list[list[dict]] = []
         self._history_len = 5
         self._tracker = DetectionTracker(
@@ -939,6 +941,31 @@ class PlasticDetector:
 
         return detections
 
+    def _detect_tiled(self, frame: np.ndarray, overlap: float = 0.25) -> tuple[
+        list[list[int]], list[float], list[int]
+    ]:
+        """Run detection on overlapping tiles for better small-object coverage."""
+        h, w = frame.shape[:2]
+        tile_h, tile_w = h // 2, w // 2
+        step_h = int(tile_h * (1 - overlap))
+        step_w = int(tile_w * (1 - overlap))
+
+        boxes: list[list[int]] = []
+        confs: list[float] = []
+        cids: list[int] = []
+
+        for y0 in range(0, h - tile_h + 1, step_h):
+            for x0 in range(0, w - tile_w + 1, step_w):
+                tile = frame[y0:y0 + tile_h, x0:x0 + tile_w]
+                tb, tc, ti = self._detect_at_scale(tile, self.input_size)
+                for b, c, i in zip(tb, tc, ti):
+                    bx, by, bw, bh = b
+                    boxes.append([bx + x0, by + y0, bw, bh])
+                    confs.append(c)
+                    cids.append(i)
+
+        return boxes, confs, cids
+
     def detect(self, frame: np.ndarray) -> list[dict]:
         enhanced = self._preprocess(frame)
 
@@ -958,6 +985,13 @@ class PlasticDetector:
             all_boxes.extend(b)
             all_confs.extend(c)
             all_cids.extend(ids)
+
+        # Tiled detection for smaller / harder-to-see objects
+        if self.use_tiling:
+            tb, tc, ti = self._detect_tiled(enhanced)
+            all_boxes.extend(tb)
+            all_confs.extend(tc)
+            all_cids.extend(ti)
 
         results: list[dict] = []
         if all_boxes:
@@ -1130,6 +1164,7 @@ class BackendReporter:
                 "subType": det.get("sub_type", "default"),
                 "wasteScore": det.get("waste_score", 0),
                 "confidence": det["confidence"],
+                "description": det.get("description", ""),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             self._buffer.append(event)

@@ -213,6 +213,7 @@ try:
                 "materialName": "Polyethylene Terephthalate",
                 "resinCode": 1,
                 "recyclable": True,
+                "description": "PET water/soda bottles",
             }
             r = self.client.post("/report", json=event)
             self.assertEqual(r.status_code, 200)
@@ -285,6 +286,129 @@ try:
                    "confidence": 5.0, "timestamp": "2026-02-14T12:00:00"}
             r = self.client.post("/report", json=bad)
             self.assertEqual(r.status_code, 422)
+
+        # ── New tests ────────────────────────────────────────────
+
+        def test_invalid_plastic_type(self):
+            """Reject unknown plasticType values."""
+            bad = {
+                "zoneId": "Z-101",
+                "plasticType": "alien_material",
+                "confidence": 0.5,
+                "timestamp": "2026-02-14T12:00:00",
+            }
+            r = self.client.post("/report", json=bad)
+            self.assertEqual(r.status_code, 422)
+
+        def test_invalid_material(self):
+            """Reject unknown material values."""
+            bad = {
+                "zoneId": "Z-101",
+                "plasticType": "plastic_bottle",
+                "confidence": 0.5,
+                "timestamp": "2026-02-14T12:00:00",
+                "material": "UNOBTANIUM",
+            }
+            r = self.client.post("/report", json=bad)
+            self.assertEqual(r.status_code, 422)
+
+        def test_stats_full_shape(self):
+            """Verify /stats returns all expected fields."""
+            event = {
+                "zoneId": "Z-101",
+                "plasticType": "plastic_bottle",
+                "confidence": 0.9,
+                "timestamp": "2026-02-14T12:00:00",
+                "material": "PET",
+                "resinCode": 1,
+                "recyclable": True,
+            }
+            self.client.post("/report", json=event)
+            r = self.client.get("/stats")
+            data = r.json()
+            for key in ("total_detections", "by_type", "by_zone",
+                        "by_material", "recyclable", "non_recyclable", "latest"):
+                self.assertIn(key, data, f"Missing key '{key}' in /stats response")
+            self.assertEqual(data["recyclable"], 1)
+            self.assertEqual(data["non_recyclable"], 0)
+            self.assertIn("PET", data["by_material"])
+
+        def test_detections_date_filter(self):
+            """Filter /detections by start and end timestamp."""
+            events = [
+                {"zoneId": "Z-101", "plasticType": "plastic_bottle",
+                 "confidence": 0.9, "timestamp": "2026-02-14T10:00:00"},
+                {"zoneId": "Z-101", "plasticType": "plastic_bag",
+                 "confidence": 0.8, "timestamp": "2026-02-14T14:00:00"},
+                {"zoneId": "Z-101", "plasticType": "plastic_cutlery",
+                 "confidence": 0.7, "timestamp": "2026-02-14T18:00:00"},
+            ]
+            for e in events:
+                self.client.post("/report", json=e)
+
+            r = self.client.get("/detections?start=2026-02-14T11:00:00&end=2026-02-14T15:00:00")
+            data = r.json()
+            self.assertEqual(data["total"], 1)
+            self.assertEqual(data["detections"][0]["plasticType"], "plastic_bag")
+
+        def test_detect_batch_no_files(self):
+            """POST /detect/batch with no files should 422 (required field)."""
+            r = self.client.post("/detect/batch")
+            self.assertIn(r.status_code, (400, 422))
+
+        @patch("backend._get_detector")
+        def test_detect_batch_images(self, mock_get_det):
+            """POST /detect/batch with two synthetic images."""
+            mock_detector = MagicMock()
+            mock_detector.detect.return_value = [
+                {
+                    "label": "bottle",
+                    "plastic_type": "plastic_bottle",
+                    "item_type": "Plastic Bottle",
+                    "material": "PET",
+                    "material_name": "Polyethylene Terephthalate",
+                    "resin_code": 1,
+                    "recyclable": True,
+                    "description": "PET water/soda bottles",
+                    "confidence": 0.91,
+                    "box": (100, 100, 50, 120),
+                },
+            ]
+            mock_get_det.return_value = mock_detector
+
+            # Create two tiny valid JPEG buffers
+            img = np.zeros((20, 20, 3), dtype=np.uint8)
+            _, buf = cv2.imencode(".jpg", img)
+            jpeg_bytes = buf.tobytes()
+
+            files = [
+                ("files", ("img1.jpg", jpeg_bytes, "image/jpeg")),
+                ("files", ("img2.jpg", jpeg_bytes, "image/jpeg")),
+            ]
+            r = self.client.post("/detect/batch", files=files)
+            self.assertEqual(r.status_code, 200)
+            data = r.json()
+            self.assertEqual(data["total_images"], 2)
+            self.assertGreaterEqual(data["total_detections"], 2)
+            self.assertEqual(len(data["results"]), 2)
+            for res in data["results"]:
+                self.assertIn("filename", res)
+                self.assertIn("detections", res)
+                self.assertIn("count", res)
+
+        def test_report_includes_description(self):
+            """Verify description field is stored and returned."""
+            event = {
+                "zoneId": "Z-101",
+                "plasticType": "plastic_bottle",
+                "confidence": 0.85,
+                "timestamp": "2026-02-14T12:00:00",
+                "description": "PET water bottle",
+            }
+            r = self.client.post("/report", json=event)
+            self.assertEqual(r.status_code, 200)
+            stored = r.json()["event"]
+            self.assertEqual(stored["description"], "PET water bottle")
 
 except ImportError:
     pass
