@@ -119,13 +119,21 @@ def _get_detector():
         try:
             from detector import PlasticDetector, CFG_PATH, WEIGHTS_PATH, CFG_PATH_TINY, WEIGHTS_PATH_TINY
             # Use tiny model if full weights are not available
+            # Disable webcam-only features (ROI margin, temporal tracking)
+            # that require multi-frame persistence and break single-image detection.
+            api_overrides = dict(
+                roi_margin=0.0,         # don't crop edges on photos
+                temporal_smooth=False,  # no frame history for single images
+                confirm_secs=0.0,       # don't require persistence
+                min_presence=0.0,       # report immediately
+            )
             if WEIGHTS_PATH.is_file():
-                _detector = PlasticDetector()
+                _detector = PlasticDetector(**api_overrides)
                 log.info("PlasticDetector loaded (full YOLOv4)")
             elif WEIGHTS_PATH_TINY.is_file():
                 _detector = PlasticDetector(
                     cfg=CFG_PATH_TINY, weights=WEIGHTS_PATH_TINY,
-                    multi_scale=False,
+                    multi_scale=False, **api_overrides,
                 )
                 log.info("PlasticDetector loaded (YOLOv4-tiny fallback)")
             else:

@@ -593,7 +593,7 @@ class DetectionTracker:
             det["confidence"] = round(min(avg_conf, 0.99), 4)
 
             # Tracking metadata
-            progress = min(age / self.confirm_secs, 1.0)
+            progress = 1.0 if self.confirm_secs <= 0 else min(age / self.confirm_secs, 1.0)
             det["tracking_status"]   = "confirmed" if progress >= 1.0 else "scanning"
             det["tracking_progress"] = round(progress, 3)
             det["tracking_secs"]     = round(age, 1)
